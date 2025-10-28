@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "dgSpecHash": "xsxbY6GRwNc=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\testuser\\source\\repos\\MyOllamaHub3\\MyOllamaHub3\\MyOllamaHub3.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\testuser\\.nuget\\packages\\microsoft.extensions.ai.abstractions\\9.10.0\\microsoft.extensions.ai.abstractions.9.10.0.nupkg.sha512",
+    "C:\\Users\\testuser\\.nuget\\packages\\microsoft.web.webview2\\1.0.3537.50\\microsoft.web.webview2.1.0.3537.50.nupkg.sha512",
+    "C:\\Users\\testuser\\.nuget\\packages\\ollamasharp\\5.4.8\\ollamasharp.5.4.8.nupkg.sha512",
+    "C:\\Users\\testuser\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.20\\microsoft.netcore.app.ref.8.0.20.nupkg.sha512",
+    "C:\\Users\\testuser\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.20\\microsoft.windowsdesktop.app.ref.8.0.20.nupkg.sha512",
+    "C:\\Users\\testuser\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.20\\microsoft.aspnetcore.app.ref.8.0.20.nupkg.sha512",
+    "C:\\Users\\testuser\\.nuget\\packages\\microsoft.netcore.app.host.win-x64\\8.0.20\\microsoft.netcore.app.host.win-x64.8.0.20.nupkg.sha512"
+  ],
+  "logs": []
+}

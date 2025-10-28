@@ -1,0 +1,623 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
+
+namespace MyOllamaHub3
+{
+    public class ThemedMarkdownView : UserControl
+    {
+        private readonly WebView2 _web;
+        private bool _ready;
+        private readonly StringBuilder _streamBuffer = new StringBuilder();
+
+        private static readonly HashSet<string> AllowedHtmlTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "div","p","span","br","strong","em","b","i","code","pre","blockquote",
+            "h1","h2","h3","h4","h5","h6","ul","ol","li","table","thead","tbody",
+            "tr","th","td","a","img","hr","sup","sub"
+        };
+
+        private static readonly HashSet<string> SelfClosingHtmlTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "br","img","hr"
+        };
+
+        private static readonly Dictionary<string, HashSet<string>> AllowedHtmlAttributes = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "a", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "href", "title", "target", "rel" } },
+            { "img", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "src", "alt", "title", "width", "height" } },
+            { "div", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "class" } },
+            { "span", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "class" } },
+            { "pre", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "class" } },
+            { "code", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "class" } },
+            { "table", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "class" } },
+            { "th", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "colspan", "rowspan", "scope" } },
+            { "td", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "colspan", "rowspan", "scope" } }
+        };
+
+        private static readonly HashSet<string> EmptyAttributeSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Regex HtmlTagRegex = new Regex(@"<(?<slash>/)?(?<name>[a-zA-Z0-9]+)(?<attrs>[^>]*)>", RegexOptions.Compiled);
+        private static readonly Regex HtmlAttributeRegex = new Regex(@"(?<name>[a-zA-Z_:][\w\-.:]*)\s*(=\s*(?<value>""[^""]*""|'[^']*'|[^>\s""']+))?", RegexOptions.Compiled);
+        private static readonly Regex ScriptLikeRegex = new Regex(@"<(script|style)[^>]*?>.*?</\1>", RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        private static readonly Regex HtmlCommentRegex = new Regex(@"<!--.*?-->", RegexOptions.Compiled | RegexOptions.Singleline);
+
+        private readonly string WarmSand = "#C6B091";
+        private readonly string SaddleTan = "#AA8B63";
+        private readonly string Umber = "#34271C";
+        private readonly string Cream = "#F0E4D2";
+        private readonly string BorderUmber = "#786656";
+        private readonly string CodeBg = "#2B2B2B";
+        private readonly string CodeInk = "#EAEAEA";
+
+        public ThemedMarkdownView()
+        {
+            _web = new WebView2
+            {
+                Dock = DockStyle.Fill,
+                DefaultBackgroundColor = Color.Transparent
+            };
+
+            Controls.Add(_web);
+            InitializeAsync();
+        }
+
+        private async void InitializeAsync()
+        {
+            try
+            {
+                var env = await CoreWebView2Environment.CreateAsync();
+                await _web.EnsureCoreWebView2Async(env);
+                _ready = true;
+
+                _web.CoreWebView2.Settings.AreDefaultScriptDialogsEnabled = false;
+                _web.CoreWebView2.Settings.IsStatusBarEnabled = false;
+                _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
+
+                _web.CoreWebView2.NewWindowRequested += (s, e) =>
+                {
+                    e.Handled = true;
+                    if (!string.IsNullOrEmpty(e.Uri))
+                        BrowserLauncher.TryOpenUrl(e.Uri, out _);
+                };
+
+                _web.CoreWebView2.NavigationStarting += (s, e) =>
+                {
+                    if (string.IsNullOrEmpty(e.Uri))
+                        return;
+
+                    if (e.Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                        e.Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                    {
+                        e.Cancel = true;
+                        BrowserLauncher.TryOpenUrl(e.Uri, out _);
+                    }
+                };
+
+                _web.CoreWebView2.NavigateToString(BuildChatShellHtml());
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"WebView2 init failed: {ex.Message}", "WebView2", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        public void Clear()
+        {
+            _streamBuffer.Clear();
+            if (_ready)
+                _web.CoreWebView2.NavigateToString(BuildChatShellHtml());
+        }
+
+        public void LoadSmart(string input)
+        {
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                Clear();
+                return;
+            }
+
+            string trimmed = input.Trim();
+            if (LooksLikeHtml(trimmed))
+            {
+                LoadHtml(trimmed);
+                return;
+            }
+
+            if (LooksLikeMarkdown(trimmed))
+            {
+                LoadMarkdown(trimmed);
+                return;
+            }
+
+            LoadMarkdown(SmartConvertToMarkdown(trimmed));
+        }
+
+        public void LoadMarkdown(string md)
+        {
+            _streamBuffer.Clear();
+            var body = MarkdownToHtml(md ?? string.Empty);
+            LoadHtml(WrapContentPage(body));
+        }
+
+        public void LoadHtml(string bodyInnerHtml)
+        {
+            _streamBuffer.Clear();
+            var safeBody = SanitizeHtml(bodyInnerHtml ?? string.Empty);
+            if (!_ready)
+            {
+                _web.CoreWebView2InitializationCompleted += (s, e) =>
+                    _web.CoreWebView2.NavigateToString(WrapContentPage(safeBody));
+                return;
+            }
+
+            _web.CoreWebView2.NavigateToString(WrapContentPage(safeBody));
+        }
+
+        public void AddUserMessage(string content)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<string>(AddUserMessage), content);
+                return;
+            }
+
+            var html = MarkdownToHtml(content ?? string.Empty);
+            Exec("appendBlock('user', " + JsLiteral(html) + ");");
+        }
+
+        public void AddAssistantMessage(string content)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<string>(AddAssistantMessage), content);
+                return;
+            }
+
+            var html = MarkdownToHtml(content ?? string.Empty);
+            Exec("appendAssistantBlock(" + JsLiteral(html) + ");");
+            _streamBuffer.Clear();
+        }
+
+        public void AddSystemMessage(string content)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<string>(AddSystemMessage), content);
+                return;
+            }
+
+            var html = MarkdownToHtml(content ?? string.Empty);
+            Exec("appendSystemBlock(" + JsLiteral(html) + ");");
+        }
+
+        public void AppendTextSafe(string delta) => AppendAssistantDelta(delta);
+
+        public void AppendAssistantDelta(string delta)
+        {
+            if (string.IsNullOrEmpty(delta))
+                return;
+
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<string>(AppendAssistantDelta), delta);
+                return;
+            }
+
+            _streamBuffer.Append(delta);
+            var html = MarkdownToHtml(_streamBuffer.ToString());
+            Exec("renderAssistant(" + JsLiteral(html) + ");");
+        }
+
+        public void ReplaceAssistantMessage(string content)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<string>(ReplaceAssistantMessage), content);
+                return;
+            }
+
+            var html = MarkdownToHtml(content ?? string.Empty);
+            Exec("renderAssistant(" + JsLiteral(html) + ");");
+            _streamBuffer.Clear();
+        }
+
+        public void EndAssistantMessage()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(EndAssistantMessage));
+                return;
+            }
+
+            if (_streamBuffer.Length > 0)
+            {
+                var html = MarkdownToHtml(_streamBuffer.ToString());
+                Exec("renderAssistant(" + JsLiteral(html) + ");");
+                _streamBuffer.Clear();
+            }
+
+            Exec("completeAssistantMessage();");
+        }
+
+        private void Exec(string js)
+        {
+            if (!_ready)
+                return;
+
+            _web.CoreWebView2.ExecuteScriptAsync(js);
+        }
+
+        private string BuildChatShellHtml()
+        {
+            var sb = new StringBuilder();
+            sb.Append("<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>");
+            sb.Append("<meta name='viewport' content='width=device-width, initial-scale=1'>");
+            sb.Append("<title>Chat</title><style>");
+            sb.Append(":root{");
+            sb.Append("--bg:").Append(WarmSand).Append(";--ink:").Append(Umber).Append(";");
+            sb.Append("--cream:").Append(Cream).Append(";--tan:").Append(SaddleTan).Append(";");
+            sb.Append("--border:").Append(BorderUmber).Append(";--codebg:").Append(CodeBg).Append(";");
+            sb.Append("--codeink:").Append(CodeInk).Append(";");
+            sb.Append("}");
+            sb.Append("html,body{height:100%;margin:0;}body{background:var(--bg);color:var(--ink);font-family:'Segoe UI',Inter,system-ui,-apple-system,Arial,sans-serif;line-height:1.45;}");
+            sb.Append("#log{height:100%;overflow:auto;padding:10px 14px 14px 14px;box-sizing:border-box;}");
+            sb.Append(".msg{max-width:100%;margin:10px 0;display:flex;}");
+            sb.Append(".msg .bubble{border-radius:10px;padding:10px 12px;border:1px solid var(--border);box-sizing:border-box;word-wrap:break-word;overflow-wrap:anywhere;}");
+            sb.Append(".msg.user{justify-content:flex-end;}.msg.user .bubble{background:#efe6d7;border-color:var(--border);}");
+            sb.Append(".msg.assistant{justify-content:flex-start;}.msg.assistant .bubble{background:var(--tan);color:var(--cream);border-color:var(--border);}");
+            sb.Append(".msg.system{justify-content:center;}.msg.system .bubble{background:#e4d9c6;color:var(--ink);border-style:dashed;}");
+            sb.Append(".bubble .table-scroll{max-width:100%;overflow:hidden;margin:6px 0;border-radius:6px;border:1px solid rgba(255,255,255,0.15);background:#080808;}");
+            sb.Append(".bubble table{border-collapse:separate;border-spacing:0;width:100%;background:#121212;color:#f7f4ef;table-layout:fixed;margin:0;}");
+            sb.Append(".bubble table tr:nth-child(even){background:#161616;}");
+            sb.Append(".bubble th,.bubble td{border:1px solid rgba(255,255,255,0.18);padding:8px 10px;word-break:break-word;overflow-wrap:anywhere;white-space:normal;vertical-align:top;}");
+            sb.Append(".bubble th{background:#1f1f1f;font-weight:600;color:#ffffff;}");
+            sb.Append(".bubble table tr:first-child th:first-child{border-top-left-radius:6px;}");
+            sb.Append(".bubble table tr:first-child th:last-child{border-top-right-radius:6px;}");
+            sb.Append(".bubble table tr:last-child td:first-child{border-bottom-left-radius:6px;}");
+            sb.Append(".bubble table tr:last-child td:last-child{border-bottom-right-radius:6px;}");
+            sb.Append(".bubble pre{background:var(--codebg);color:var(--codeink);padding:10px;border-radius:6px;overflow:auto;}");
+            sb.Append(".bubble code{font-family:'Cascadia Code',Consolas,monospace;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;}");
+            sb.Append(".bubble a{color:#4060a0;text-decoration:none;}.bubble a:hover{text-decoration:underline;}");
+            sb.Append("</style></head><body><div id='log'></div><script>");
+            sb.Append("function ensureStreamingAssistant(forceNew){const log=document.getElementById('log');let last=log.lastElementChild;");
+            sb.Append("if(forceNew&&last&&last.classList.contains('assistant')){last.dataset.streaming='false';last=null;}");
+            sb.Append("if(!last||!last.classList.contains('assistant')||last.dataset.streaming!=='true'){if(last&&last.classList.contains('assistant')){last.dataset.streaming='false';}");
+            sb.Append("last=document.createElement('div');last.className='msg assistant';last.dataset.streaming='true';const bub=document.createElement('div');bub.className='bubble';last.appendChild(bub);log.appendChild(last);}return last.querySelector('.bubble');}");
+            sb.Append("function appendBlock(role,htmlBlock){const log=document.getElementById('log');const msg=document.createElement('div');msg.className='msg '+role;const bub=document.createElement('div');bub.className='bubble';bub.innerHTML=htmlBlock;msg.appendChild(bub);log.appendChild(msg);log.scrollTop=log.scrollHeight;}");
+            sb.Append("function renderAssistant(htmlBlock){const bubble=ensureStreamingAssistant(false);bubble.innerHTML=htmlBlock;bubble.parentElement.dataset.streaming='true';const log=document.getElementById('log');log.scrollTop=log.scrollHeight;}");
+            sb.Append("function appendAssistantBlock(htmlBlock){const log=document.getElementById('log');const msg=document.createElement('div');msg.className='msg assistant';msg.dataset.streaming='false';const bubble=document.createElement('div');bubble.className='bubble';bubble.innerHTML=htmlBlock;msg.appendChild(bubble);log.appendChild(msg);log.scrollTop=log.scrollHeight;}");
+            sb.Append("function appendSystemBlock(htmlBlock){const log=document.getElementById('log');const msg=document.createElement('div');msg.className='msg system';const bubble=document.createElement('div');bubble.className='bubble';bubble.innerHTML=htmlBlock;msg.appendChild(bub);log.appendChild(msg);log.scrollTop=log.scrollHeight;}");
+            sb.Append("function completeAssistantMessage(){const log=document.getElementById('log');const last=log.lastElementChild;if(last&&last.classList.contains('assistant')){last.dataset.streaming='false';}}");
+            sb.Append("</script></body></html>");
+            return sb.ToString();
+        }
+
+        private string WrapContentPage(string inner)
+        {
+            var sb = new StringBuilder();
+            sb.Append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>");
+            sb.Append("<meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Output</title><style>");
+            sb.Append(":root{--bg:").Append(WarmSand).Append(";--ink:").Append(Umber).Append(";--tan:")
+              .Append(SaddleTan).Append(";--border:").Append(BorderUmber).Append(";--codebg:")
+              .Append(CodeBg).Append(";--codeink:").Append(CodeInk).Append(";}");
+            sb.Append("html,body{height:100%;margin:0;}body{background:var(--bg);color:var(--ink);font-family:'Segoe UI',Inter,sans-serif;line-height:1.45;}");
+            sb.Append(".md{padding:10px 14px;}a{color:#4060a0;text-decoration:none;}a:hover{text-decoration:underline;}");
+            sb.Append("pre.code{background:var(--codebg);color:var(--codeink);padding:10px;border-radius:6px;overflow:auto;}code.inline{background:rgba(0,0,0,.07);padding:1px 4px;border-radius:3px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;}");
+            sb.Append(".table-scroll{max-width:100%;overflow:hidden;margin:6px 0;border-radius:6px;border:1px solid rgba(255,255,255,0.15);background:#080808;}");
+            sb.Append("table{border-collapse:separate;border-spacing:0;width:100%;background:#121212;margin:0;table-layout:fixed;color:#f7f4ef;}");
+            sb.Append("table tr:nth-child(even){background:#161616;}");
+            sb.Append("th,td{border:1px solid rgba(255,255,255,0.18);padding:8px 10px;word-break:break-word;overflow-wrap:anywhere;white-space:normal;vertical-align:top;}");
+            sb.Append("th{background:#1f1f1f;font-weight:600;color:#ffffff;}");
+            sb.Append("table tr:first-child th:first-child{border-top-left-radius:6px;}");
+            sb.Append("table tr:first-child th:last-child{border-top-right-radius:6px;}");
+            sb.Append("table tr:last-child td:first-child{border-bottom-left-radius:6px;}");
+            sb.Append("table tr:last-child td:last-child{border-bottom-right-radius:6px;}");
+            sb.Append("</style></head><body>").Append(inner).Append("</body></html>");
+            return sb.ToString();
+        }
+
+        private static bool LooksLikeHtml(string s) =>
+            s.StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
+            Regex.IsMatch(s, @"<html\b|<head\b|<body\b", RegexOptions.IgnoreCase) ||
+            Regex.IsMatch(s, @"</?(table|div|span|p|a|pre|code|ul|ol|li|h\d)\b", RegexOptions.IgnoreCase);
+
+        private static bool LooksLikeMarkdown(string s) =>
+            s.Contains("```") ||
+            Regex.IsMatch(s, @"(^|\n)#{1,6}\s+\S") ||
+            Regex.IsMatch(s, @"(^|\n)\s*[-*+]\s+\S") ||
+            Regex.IsMatch(s, @"(^|\n)\|.+\|\s*\n\|?\s*:?-{3,}") ||
+            Regex.IsMatch(s, @"\[(.*?)\]\((https?://[^\s)]+)\)");
+
+        private string SmartConvertToMarkdown(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return string.Empty;
+
+            var blocks = Regex.Split(text.Replace("\r\n", "\n"), @"\n\s*\n")
+                              .Select(b => b.Trim('\n'))
+                              .Where(b => !string.IsNullOrWhiteSpace(b))
+                              .ToList();
+
+            var sb = new StringBuilder();
+
+            foreach (var block in blocks)
+            {
+                if (TryConvertCsv(block, out var csvMd))
+                {
+                    sb.AppendLine(csvMd);
+                }
+                else if (TryConvertTsv(block, out var tsvMd))
+                {
+                    sb.AppendLine(tsvMd);
+                }
+                else if (TryConvertSpaceColumns(block, out var spaceMd))
+                {
+                    sb.AppendLine(spaceMd);
+                }
+                else if (TryConvertKeyValue(block, out var kvMd))
+                {
+                    sb.AppendLine(kvMd);
+                }
+                else
+                {
+                    sb.AppendLine(AutoLink(block));
+                }
+
+                sb.AppendLine();
+            }
+
+            return sb.ToString().Trim();
+        }
+
+        private static string AutoLink(string s) =>
+            Regex.Replace(s, @"(?<!\()(?<url>https?://[^\s)]+)",
+                m => "[" + m.Groups["url"].Value + "](" + m.Groups["url"].Value + ")");
+
+        private static bool TryConvertCsv(string block, out string md)
+        {
+            md = string.Empty;
+            var lines = block.Split('\n');
+            if (lines.Length < 2 || !lines.Any(l => l.Contains(',')))
+                return false;
+
+            var rows = new List<List<string>>();
+            foreach (var line in lines)
+            {
+                var row = ParseDelimited(line, ',');
+                if (row.Count <= 1)
+                    return false;
+                rows.Add(row);
+            }
+
+            md = RowsToMarkdownTable(rows);
+            return true;
+        }
+
+        private static bool TryConvertTsv(string block, out string md)
+        {
+            md = string.Empty;
+            var lines = block.Split('\n');
+            if (lines.Length < 2 || !lines.Any(l => l.Contains('\t')))
+                return false;
+
+            var rows = lines.Select(l => l.Split('\t').Select(x => x.Trim()).ToList()).ToList();
+            if (rows.All(r => r.Count == rows[0].Count && r.Count > 1))
+            {
+                md = RowsToMarkdownTable(rows);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryConvertSpaceColumns(string block, out string md)
+        {
+            md = string.Empty;
+            var lines = block.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+            if (lines.Count < 2)
+                return false;
+
+            var rows = new List<List<string>>();
+            foreach (var line in lines)
+            {
+                var parts = Regex.Split(line.Trim(), @"\s{2,}").Where(x => x.Length > 0).ToList();
+                if (parts.Count <= 1)
+                {
+                    rows.Clear();
+                    break;
+                }
+                rows.Add(parts);
+            }
+
+            if (rows.Count >= 2 && rows.All(r => r.Count == rows[0].Count))
+            {
+                md = RowsToMarkdownTable(rows);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryConvertKeyValue(string block, out string md)
+        {
+            md = string.Empty;
+            var lines = block.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+            if (lines.Count < 2)
+                return false;
+
+            var rows = new List<List<string>>();
+            foreach (var l in lines)
+            {
+                var m = Regex.Match(l, @"^\s*(.+?)\s*[:=]\s*(.+?)\s*$");
+                if (!m.Success)
+                {
+                    rows.Clear();
+                    break;
+                }
+                rows.Add(new List<string> { m.Groups[1].Value.Trim(), m.Groups[2].Value.Trim() });
+            }
+
+            if (rows.Count >= 2)
+            {
+                rows.Insert(0, new List<string> { "Field", "Value" });
+                md = RowsToMarkdownTable(rows);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static string RowsToMarkdownTable(List<List<string>> rows)
+        {
+            if (rows == null || rows.Count == 0)
+                return string.Empty;
+
+            var sb = new StringBuilder();
+            var header = rows[0];
+            sb.Append("| ").Append(string.Join(" | ", header.Select(EscapeMdCell))).AppendLine(" |");
+            sb.Append("| ").Append(string.Join(" | ", header.Select(_ => "---"))).AppendLine(" |");
+            foreach (var row in rows.Skip(1))
+                sb.Append("| ").Append(string.Join(" | ", row.Select(EscapeMdCell))).AppendLine(" |");
+            return sb.ToString().TrimEnd();
+        }
+
+        private static string EscapeMdCell(string s) => (s ?? string.Empty).Replace("|", "\\|");
+
+        private static List<string> ParseDelimited(string line, char delim)
+        {
+            var result = new List<string>();
+            if (line == null)
+                return result;
+
+            var sb = new StringBuilder();
+            bool inQuotes = false;
+            for (int i = 0; i < line.Length; i++)
+            {
+                char c = line[i];
+                if (inQuotes)
+                {
+                    if (c == '\"')
+                    {
+                        if (i + 1 < line.Length && line[i + 1] == '\"')
+                        {
+                            sb.Append('\"');
+                            i++;
+                        }
+                        else
+                        {
+                            inQuotes = false;
+                        }
+                    }
+                    else
+                    {
+                        sb.Append(c);
+                    }
+                }
+                else
+                {
+                    if (c == '\"')
+                    {
+                        inQuotes = true;
+                    }
+                    else if (c == delim)
+                    {
+                        result.Add(sb.ToString().Trim());
+                        sb.Clear();
+                    }
+                    else
+                    {
+                        sb.Append(c);
+                    }
+                }
+            }
+
+            result.Add(sb.ToString().Trim());
+            return result;
+        }
+
+        private string MarkdownToHtml(string md)
+        {
+            var sb = new StringBuilder();
+            var lines = (md ?? string.Empty).Replace("\r\n", "\n").Split('\n');
+            bool inCode = false;
+            var renderedTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            sb.Append("<div class=\"md\">");
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i];
+
+                if (line.StartsWith("```") )
+                {
+                    if (!inCode)
+                    {
+                        inCode = true;
+                        sb.Append("<pre class=\"code\"><code>");
+                    }
+                    else
+                    {
+                        inCode = false;
+                        sb.Append("</code></pre>");
+                    }
+                    continue;
+                }
+
+                if (inCode)
+                {
+                    sb.Append(HtmlEscape(line)).Append('\n');
+                    continue;
+                }
+
+                if (Regex.IsMatch(line, @"^\s*\|"))
+                {
+                    var block = new List<string>();
+                    int j = i;
+                    while (j < lines.Length && Regex.IsMatch(lines[j], @"^\s*\|"))
+                    {
+                        block.Add(lines[j]);
+                        j++;
+                    }
+
+                    var htmlTable = RenderPipeTable(block, renderedTables);
+                    if (!string.IsNullOrEmpty(htmlTable))
+                        sb.Append(htmlTable);
+
+                    i = j - 1;
+                    continue;
+                }
+
+                if (line.StartsWith("#"))
+                {
+                    int level = Math.Min(6, line.TakeWhile(ch => ch == '#').Count());
+                    string text = line.Substring(level).Trim();
+                    sb.Append("<h" + level + ">").Append(InlineFormat(text)).Append("</h" + level + ">");
+                    continue;
+                }
+
+                if (Regex.IsMatch(line, @"^\s*[-*]\s+"))
+                {
+                    sb.Append("<ul>");
+                    while (i < lines.Length && Regex.IsMatch(lines[i], @"^\s*[-*]\s+"))
+                    {
+                        var item = Regex.Replace(lines[i], @"^\s*[-*]\s+", string.Empty);
+                        sb.Append("<li>").Append(InlineFormat(item)).Append("</li>");
+                        i++;
+                    }
+                    sb.Append("</ul>");
+                    i--;
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(line))
+                    sb.Append("<div class=\"sp\"></div>");
+                else
+                    sb.Append("<p>").Append(InlineFormat(line)).Append("</p>");
+            }
+
+        ...
