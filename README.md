@@ -85,6 +85,7 @@ MyOllamaHub3.sln
 - **Send / Cancel buttons:** Kick off or abort streaming requests.
 - **Diagnostics rail:** Shows background events (e.g., persistence failures, warmups). Errors appear in red for quick attention.
 - **Markdown transcript:** Renders system, user, assistant, and tool outputs. Tool executions appear in a dedicated block with success/failure status.
+<img width="1919" height="1032" alt="Screenshot 2025-10-27 201532" src="https://github.com/user-attachments/assets/cead74b1-e566-46f9-af21-b7f2feec9870" />
 
 ### Sessions Tab
 
@@ -113,6 +114,7 @@ MyOllamaHub3.sln
 - **System & stops:** Edit the system prompt and manage stop sequences (add/remove list).
 - **Determinism:** Set a fixed seed or enable per-run randomization.
 - **Command bar:** Reset to defaults, import/export option JSON, or apply without closing.
+<img width="1919" height="1029" alt="Screenshot 2025-10-27 201732" src="https://github.com/user-attachments/assets/4943358b-184e-4960-bad6-27b3015e9e1c" />
 
 ### Settings & Persistence
 
@@ -160,3 +162,4 @@ Add your chosen license here (MIT, Apache 2.0, etc.).
 ---
 
 Need help or have feature ideas? Open an issue or start a discussion—MyOllamaHub3 is evolving rapidly, and community input is welcome.
+
